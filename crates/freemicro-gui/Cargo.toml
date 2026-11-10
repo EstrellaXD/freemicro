@@ -1,0 +1,16 @@
+[package]
+name = "freemicro-gui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Own crate so the daemon build never pulls in gpui.
+[dependencies]
+freemicro = { path = "../freemicro" }
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+libc = "0.2.186"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+resvg = "0.45"
+serde_json = "1.0.149"
+tray-icon = "0.21"

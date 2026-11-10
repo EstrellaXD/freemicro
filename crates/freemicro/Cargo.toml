@@ -1,0 +1,34 @@
+[package]
+name = "freemicro"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the FreeMicro runtime daemon for the Creator Micro 2 / Codex Micro pad"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "freemicro-rs"
+path = "src/main.rs"
+
+[lib]
+name = "freemicro"
+path = "src/lib.rs"
+
+# Every dependency the port needs, declared once. IOKit, CoreFoundation,
+# CoreGraphics (CGEvent) and the objc runtime are hand-written FFI, so there is
+# no framework crate here.
+[dependencies]
+# Wire format, state files, keymap.json. preserve_order keeps keymap.json key
+# order on pull/push, so an unchanged keymap re-encodes to the same bytes.
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+# Derive for strict on-disk records (pad.lock payload, status.json). Lenient
+# readers (state files, keymap.json) use serde_json::Value.
+serde = { version = "1.0.228", features = ["derive"] }
+# fs.readbin / fs.writebin payloads.
+base64 = "0.22.1"
+# fs.list {checksum: true} verification after a keymap write.
+sha1 = "0.10.6"
+# flock, getuid, kill(pid, 0), signal handlers.
+libc = "0.2.186"
+# Error plumbing at the CLI and run-loop level.
+anyhow = "1.0.102"
