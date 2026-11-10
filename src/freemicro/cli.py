@@ -981,7 +981,8 @@ def _daemon_install_on_connect(args: argparse.Namespace) -> int:
     print(f"  plist:   {result['path']}")
     print(f"  command: {daemon.status()['command']}")
     print(f"  matches: Codex Micro  VID 0x{daemon.CODEX_MICRO_VID:04X} / "
-          f"PID 0x{daemon.CODEX_MICRO_PID:04X}  (IOHIDDevice over BLE, "
+          f"PID 0x{daemon.CODEX_MICRO_PID:04X}, Creator Micro 2 PID "
+          f"{'/'.join(f'0x{p:04X}' for p in daemon.CREATOR_MICRO_2_PIDS)}  (IOHIDDevice over BLE, "
           "IOUSBHostDevice over USB)")
     print(f"  log:     {daemon.log_path()}")
     print(
@@ -1994,6 +1995,22 @@ def _print_dispatch(result) -> None:
     print(line if result.ok else f"{line}  FAILED: {result.error}")
 
 
+def cmd_keymap(args: argparse.Namespace) -> int:
+    from freemicro import padkeymap
+
+    if args.action == "pull":
+        return padkeymap.pull(Path(args.out).expanduser())
+    if not args.test and not args.file:
+        print("freemicro keymap push: give the edited file, or --test", file=sys.stderr)
+        return 2
+    try:
+        return padkeymap.push(Path(args.file).expanduser() if args.file else None,
+                              test=args.test)
+    except (OSError, ValueError) as exc:
+        print(f"freemicro keymap push: {exc}", file=sys.stderr)
+        return 2
+
+
 def cmd_lights(args: argparse.Namespace) -> int:
     """Send lighting straight to the pad - the LED smoke test."""
     from freemicro.device import close_shared
@@ -2320,6 +2337,7 @@ def _run_pipeline(
     from freemicro.device import close_shared, run_with_reconnect
     from freemicro.input.actions import RecordingBackend, best_backend
     from freemicro.input.bridge import Bridge, JoystickTracker
+    from freemicro.input.smartactions import handle_smart_action
     from freemicro.lighting_owner import (
         REASON_CONFIG,
         REASON_CONFIG_BROKEN,
@@ -2381,6 +2399,11 @@ def _run_pipeline(
         from freemicro.input.frontmost import FrontmostWatcher
 
         frontmost = FrontmostWatcher(interval=pad.profile_poll_ms / 1000.0)
+    # Drives a Creator Micro 2's own per-app layers - the job Work Louder's Input
+    # app did. A no-op on any other pad. See PadFocusForwarder.
+    from freemicro.input.frontmost import PadFocusForwarder
+
+    pad_focus = PadFocusForwarder()
     last: AgentState | None = None
     override = Path(args.config).expanduser() if getattr(args, "config", None) else None
     config_watcher = staleness.ConfigWatcher(
@@ -2398,6 +2421,7 @@ def _run_pipeline(
         # `freemicro lights --enable` take effect without a restart.
         renderers.append(leds)
         last = None  # force a re-light so the pad shows state immediately
+        pad_focus.attach(dev)
         if leds.available():
             note = "keys live, LEDs live"
         elif pad.lighting.enabled:
@@ -2467,6 +2491,7 @@ def _run_pipeline(
         renderers = []
         last = None
         owner.attach(None)
+        pad_focus.attach(None)
         # A latching push-to-talk left a dictation app recording; the pad going
         # away is the one moment we know for certain the key can no longer stop
         # it, so send the toggle-off tap now rather than wait out a timeout. The
@@ -2524,6 +2549,10 @@ def _run_pipeline(
         # outlasted its timeout is the tick that repaints without it.
         _print_lighting(overlay.poll(), verbose)
         reload_config()
+        sent = pad_focus.poll()
+        if sent and verbose:
+            print(f"  [layers] told the pad {sent[0]} ({sent[1]}) is frontmost",
+                  flush=True)
         # Refresh which app is frontmost so the next press resolves its profile
         # against a fresh answer - but only when profiles are configured, and
         # only here on the tick, never on the key path. The watcher throttles the
@@ -2578,6 +2607,10 @@ def _run_pipeline(
         # One clock read. This channel carries key events *and* lighting, so
         # nothing may be written to it while a burst is arriving.
         owner.note_input()
+        done = handle_smart_action(message, backend.type_text)
+        if done:
+            print(f"  [{done}]", flush=True)
+            return
         for result in bridge.handle(message):
             _print_dispatch(result)
 
@@ -2810,6 +2843,22 @@ def build_parser() -> argparse.ArgumentParser:
     lt.add_argument("--restore", action="store_true",
                     help="apply lighting.on_exit when finished")
     lt.set_defaults(func=cmd_lights)
+
+    km = sub.add_parser(
+        "keymap",
+        help="read or write a Creator Micro 2's layers, macros and app links",
+    )
+    km_sub = km.add_subparsers(dest="action", required=True)
+    km_pull = km_sub.add_parser("pull", help="save the pad's keymap.json")
+    km_pull.add_argument("out", nargs="?", default="keymap.json",
+                         help="where to save it (default: ./keymap.json)")
+    km_push = km_sub.add_parser(
+        "push", help="write an edited keymap.json back (backed up, verified)")
+    km_push.add_argument("file", nargs="?", help="the edited keymap.json")
+    km_push.add_argument("--test", action="store_true",
+                         help="write the pad's current keymap back unchanged, to "
+                              "prove the write path safely first")
+    km.set_defaults(func=cmd_keymap)
 
     e = sub.add_parser("emit", help="manually set a state (testing)")
     e.add_argument("state", choices=[s.value for s in AgentState])

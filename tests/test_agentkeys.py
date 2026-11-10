@@ -1002,6 +1002,28 @@ def test_without_a_store_the_pad_mirrors_instead_of_going_dark(monkeypatch):
 # Pressing a key: focus the terminal, do not type into one
 # ---------------------------------------------------------------------------
 
+def test_a_herdr_session_focuses_its_pane_by_session_id(monkeypatch):
+    from freemicro import herdr
+
+    calls = []
+
+    def fake_request(method, params=None):
+        calls.append((method, params))
+        return {"agents": [
+            {"pane_id": "w1:p1", "agent_session": {"value": "other"}},
+            {"pane_id": "w3:p7", "agent_session": {"value": "a"}},
+        ]}
+
+    monkeypatch.setattr(herdr, "request", fake_request)
+    plan = focus.plan_for_session(
+        session("a", AgentState.WORKING, "/code/api", NOW,
+                tty="/dev/ttys038", term_program="herdr")
+    )
+    assert plan.method == focus.METHOD_HERDR
+    assert focus.perform(plan, backend=None) is True
+    assert calls[-1] == ("agent.focus", {"target": "w3:p7"})
+
+
 def test_a_terminal_tab_is_identified_by_tty():
     plan = focus.plan_for_session(
         session(

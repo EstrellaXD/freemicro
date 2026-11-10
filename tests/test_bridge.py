@@ -431,6 +431,10 @@ _RUNNABLE = {
     # intercepts it before delivery), so it belongs in MODIFIER_SAFE_KINDS and
     # never in MODIFIER_HOLDING_KINDS.
     "layer": {"layer": "fn"},
+    # A herdr preset writes to herdr's socket, never to the keyboard, so a held
+    # modifier cannot change what it does. dial-mode is local state only, so
+    # this test never reaches a real herdr.
+    "herdr": {"preset": "dial-mode"},
 }
 
 

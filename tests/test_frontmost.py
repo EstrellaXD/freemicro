@@ -8,7 +8,7 @@ to the extent that it never raises and answers ``None`` off macOS.
 
 from __future__ import annotations
 
-from freemicro.input.frontmost import FrontmostWatcher, detect_frontmost
+from freemicro.input.frontmost import FrontmostWatcher, PadFocusForwarder, detect_frontmost
 
 
 class _Clock:
@@ -80,3 +80,38 @@ def test_a_raising_provider_degrades_to_none():
     watcher = FrontmostWatcher(boom, clock=_Clock(), interval=0.0)
     assert watcher.poll() is None
     assert watcher.current is None
+
+
+class _Pad:
+    def __init__(self, cm2: bool = True) -> None:
+        self.is_creator_micro_2 = cm2
+        self.sent: list = []
+
+    def send(self, message: dict) -> None:
+        self.sent.append(message["p"]["process"])
+
+
+def test_pad_focus_forwarder_sends_on_change_and_on_reconnect_only():
+    now = [0.0]
+    app = [("Figma", "com.figma.Desktop")]
+    fwd = PadFocusForwarder(lambda: app[0], clock=lambda: now[0], interval=1.0)
+    pad = _Pad()
+    fwd.attach(pad)
+    fwd.poll()
+    now[0] += 0.5
+    app[0] = ("Safari", "com.apple.Safari")
+    fwd.poll()  # inside the throttle window: not re-read
+    now[0] += 1.0
+    fwd.poll()
+    now[0] += 1.0
+    fwd.poll()  # unchanged: not re-sent
+    fwd.attach(pad)  # a reconnect re-sends the current app at once
+    fwd.poll()
+    assert pad.sent == ["com.figma.Desktop", "com.apple.Safari", "com.apple.Safari"]
+
+
+def test_pad_focus_forwarder_ignores_pads_without_per_app_layers():
+    pad = _Pad(cm2=False)
+    fwd = PadFocusForwarder(lambda: ("Figma", "com.figma.Desktop"))
+    fwd.attach(pad)
+    assert fwd.poll() is None and pad.sent == []

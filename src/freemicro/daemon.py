@@ -51,6 +51,9 @@ ONCONNECT_LABEL = "com.freemicro.onconnect"
 #: over USB it also appears under ``IOUSBHostDevice`` as ``idVendor``/``idProduct``.
 CODEX_MICRO_VID = 0x303A  # 12346
 CODEX_MICRO_PID = 0x8360  # 33632
+#: The Work Louder Creator Micro 2 on the same firmware (both PIDs Work Louder
+#: registers for it); launchd watches for all three.
+CREATOR_MICRO_2_PIDS = (0x8297, 0x8298)  # 33431, 33432
 
 #: Cap for the log file. launchd never rotates; we do it ourselves, keeping the
 #: newest half. A log that grows without bound on a laptop is a bug.
@@ -369,6 +372,17 @@ def build_onconnect_plist(argv: Optional[List[str]] = None) -> Dict[str, Any]:
                     "idVendor": CODEX_MICRO_VID,
                     "idProduct": CODEX_MICRO_PID,
                 },
+                # The Creator Micro 2, over each transport.
+                **{
+                    f"com.freemicro.creatormicro2-{kind}-{pid:04x}": match
+                    for pid in CREATOR_MICRO_2_PIDS
+                    for kind, match in (
+                        ("hid", {"IOProviderClass": "IOHIDDevice",
+                                 "VendorID": CODEX_MICRO_VID, "ProductID": pid}),
+                        ("usb", {"IOProviderClass": "IOUSBHostDevice",
+                                 "idVendor": CODEX_MICRO_VID, "idProduct": pid}),
+                    )
+                },
             }
         },
         "RunAtLoad": False,
@@ -434,6 +448,25 @@ def _bootout(label: str = LABEL) -> Tuple[int, str]:
     if legacy_code == 0:
         return 0, legacy_out
     return code, out
+
+
+def pause() -> bool:
+    """Stop the login daemon for a moment; ``True`` if it was installed.
+
+    For a command that must be the pad's only host (``freemicro keymap push``).
+    ``bootout`` rather than a kill, because the job is ``KeepAlive`` and launchd
+    would restart a killed daemon straight back onto the pad.
+    """
+    if not is_installed(LABEL):
+        return False
+    _bootout(LABEL)
+    return True
+
+
+def resume() -> None:
+    """Undo :func:`pause`: register the login daemon again and start it."""
+    _launchctl("bootstrap", f"gui/{os.getuid()}", str(plist_path(LABEL)))
+    _launchctl("kickstart", "-k", service_target(LABEL))
 
 
 def _install(
@@ -722,6 +755,7 @@ def onconnect_status() -> Dict[str, Any]:
 __all__ = [
     "CODEX_MICRO_PID",
     "CODEX_MICRO_VID",
+    "CREATOR_MICRO_2_PIDS",
     "LABEL",
     "LOG_CAP_BYTES",
     "ONCONNECT_LABEL",

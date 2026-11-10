@@ -32,9 +32,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 VENDOR_ID = 0x303A
 PRODUCT_ID = 0x8360
+#: The Work Louder Creator Micro 2 running the same vendor firmware (seen on
+#: v0.6.3). Over USB it ignores the bare 63-byte write and answers only the
+#: Bluetooth-style 64-byte framing, so it is framed that way on every transport,
+#: and - like the vendor's own Input app - without the CRLF terminator, which it
+#: answers with a ``400 EmptyInput`` error. Work Louder registers both PIDs.
+CREATOR_MICRO_2_PRODUCT_IDS = (0x8297, 0x8298)
+PRODUCT_IDS = (PRODUCT_ID,) + CREATOR_MICRO_2_PRODUCT_IDS
 
 #: The vendor collection's report id (input *and* output).
 REPORT_ID = 6
+USAGE_PAGE_VENDOR = 0xFF00
 
 #: Output report size per transport. USB takes the payload bare; Bluetooth
 #: expects the report id repeated as the first byte of the buffer.
@@ -70,7 +78,9 @@ TRANSPORT_NOTE = (
 # Framing - pure, testable, platform independent
 # ---------------------------------------------------------------------------
 
-def frame_message(payload: str, transport: str = TRANSPORT_USB) -> List[bytes]:
+def frame_message(
+    payload: str, transport: str = TRANSPORT_USB, eol: bytes = b"\r\n",
+) -> List[bytes]:
     """Split a JSON string into vendor-channel output reports.
 
     The framing **differs by transport**, and this is the single nastiest trap
@@ -96,7 +106,7 @@ def frame_message(payload: str, transport: str = TRANSPORT_USB) -> List[bytes]:
     ble = transport == TRANSPORT_BLE
     size = REPORT_BYTES_BLE if ble else REPORT_BYTES
     prefix = 1 if ble else 0
-    data = payload.encode("utf-8") + b"\r\n"
+    data = payload.encode("utf-8") + eol
     reports: List[bytes] = []
     for offset in range(0, len(data), MAX_CHUNK):
         chunk = data[offset:offset + MAX_CHUNK]
@@ -321,7 +331,10 @@ class Device:
     and read the keys in a single process.
     """
 
-    def __init__(self, ref: Any, transport: str = TRANSPORT_USB) -> None:
+    def __init__(
+        self, ref: Any, transport: str = TRANSPORT_USB,
+        product_id: int = PRODUCT_ID,
+    ) -> None:
         self._ref = ref
         self._closed = False
         self._decoder = FrameDecoder()
@@ -337,6 +350,11 @@ class Device:
         self._stop = False
         #: ``"USB"`` or ``"Bluetooth Low Energy"``, straight from IOKit.
         self.transport = transport
+        #: Whether this is a Creator Micro 2 - see :data:`CREATOR_MICRO_2_PRODUCT_IDS`.
+        self.is_creator_micro_2 = product_id in CREATOR_MICRO_2_PRODUCT_IDS
+        #: The transport whose framing writes use, and the message terminator.
+        self._framing = TRANSPORT_BLE if self.is_creator_micro_2 else transport
+        self._eol = b"" if self.is_creator_micro_2 else b"\r\n"
 
     def request_stop(self) -> None:
         """Ask a running :meth:`stream` to return at its next tick."""
@@ -364,7 +382,7 @@ class Device:
         path, so lighting never touches the run loop.
         """
         payload = json.dumps(message, separators=(",", ":"))
-        for report in frame_message(payload, self.transport):
+        for report in frame_message(payload, self._framing, self._eol):
             self.send_report(report)
 
     def notify(self, method: str, params: Any) -> None:
@@ -373,21 +391,28 @@ class Device:
 
     def request(
         self, method: str, params: Any = None, request_id: int = 1,
-        timeout: float = 2.0,
+        timeout: float = 2.0, match_id: bool = False, standard: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Send a request and wait briefly for its reply.
 
         Only for methods that *answer* - the ``v.oai.*`` notifications 404 if
-        given an id. Returns ``None`` on timeout.
+        given an id. Returns ``None`` on timeout. ``match_id`` accepts only the
+        reply carrying ``request_id``, for callers (file writes) that must never
+        take another client's acknowledgement as their own. ``standard`` sends
+        the long ``{method, params}`` envelope: firmware 0.6.3 ignores the short
+        ``p`` of an ``fs.writebin`` ("Missing data parameter").
         """
-        message: Dict[str, Any] = {"m": method, "id": int(request_id)}
+        method_key, params_key = ("method", "params") if standard else ("m", "p")
+        message: Dict[str, Any] = {method_key: method, "id": int(request_id)}
         if params is not None:
-            message["p"] = params
+            message[params_key] = params
         reply: List[Dict[str, Any]] = []
         sent = []
 
         def _on_event(msg: Dict[str, Any]) -> None:
-            if msg.get("id") == request_id or "result" in msg or "error" in msg:
+            if msg.get("id") == request_id or (
+                not match_id and ("result" in msg or "error" in msg)
+            ):
                 reply.append(msg)
                 self.request_stop()
 
@@ -560,7 +585,17 @@ class Device:
         self.close()
 
 
-def _matching_service() -> Optional[Tuple[int, str]]:
+def _service_rank(transport: str, usage_page: Optional[int]) -> Tuple[bool, bool]:
+    """Higher is better: USB first, then the vendor (``0xFF00``) interface.
+
+    A Codex Micro vends one service that only *contains* the vendor
+    collection. A Creator Micro 2 vends one service per USB interface
+    (keyboard, consumer, vendor), and only the vendor one answers.
+    """
+    return (transport == TRANSPORT_USB, usage_page == USAGE_PAGE_VENDOR)
+
+
+def _matching_service() -> Optional[Tuple[int, str, int]]:
     """Find the pad's IOHIDDevice service, preferring USB over Bluetooth.
 
     The same pad can be present twice - cable in *and* paired over BLE. Both
@@ -576,24 +611,26 @@ def _matching_service() -> Optional[Tuple[int, str]]:
     _iokit.IOServiceGetMatchingServices(
         0, _iokit.IOServiceMatching(b"IOHIDDevice"), ctypes.byref(iterator)
     )
-    best: Optional[Tuple[int, str]] = None
+    best: Optional[Tuple[int, str, int]] = None
+    best_rank = (False, False)
     while True:
         candidate = _iokit.IOIteratorNext(iterator.value)
         if not candidate:
             break
+        product_id = _prop_int(candidate, "ProductID")
         matched = (
             _prop_int(candidate, "VendorID") == VENDOR_ID
-            and _prop_int(candidate, "ProductID") == PRODUCT_ID
+            and product_id in PRODUCT_IDS
         )
         if not matched:
             _iokit.IOObjectRelease(candidate)
             continue
         transport = _prop_str(candidate, "Transport") or "unknown"
-        if best is None:
-            best = (candidate, transport)
-        elif transport == TRANSPORT_USB and best[1] != TRANSPORT_USB:
-            _iokit.IOObjectRelease(best[0])
-            best = (candidate, transport)
+        rank = _service_rank(transport, _prop_int(candidate, "PrimaryUsagePage"))
+        if best is None or rank > best_rank:
+            if best is not None:
+                _iokit.IOObjectRelease(best[0])
+            best, best_rank = (candidate, transport, product_id), rank
         else:
             _iokit.IOObjectRelease(candidate)
     return best
@@ -615,7 +652,7 @@ def open_device() -> Optional[Device]:
     found = _matching_service()
     if found is None:
         return None
-    service, transport = found
+    service, transport, product_id = found
     try:
         ref = _iokit.IOHIDDeviceCreate(None, service)
     finally:
@@ -627,7 +664,7 @@ def open_device() -> Optional[Device]:
         if _cf is not None:
             _cf.CFRelease(ref)
         return None
-    return Device(ref, transport=transport)
+    return Device(ref, transport=transport, product_id=product_id)
 
 
 def device_transport() -> Optional[str]:
@@ -642,7 +679,7 @@ def device_transport() -> Optional[str]:
     if found is None:
         return None
     assert _iokit is not None
-    service, transport = found
+    service, transport, _ = found
     _iokit.IOObjectRelease(service)
     return transport
 
@@ -660,7 +697,9 @@ __all__ = [
     "FrameDecoder",
     "MAX_CHUNK",
     "OPCODE_DATA",
+    "CREATOR_MICRO_2_PRODUCT_IDS",
     "PRODUCT_ID",
+    "PRODUCT_IDS",
     "REPORT_BYTES",
     "REPORT_ID",
     "REPORT_BYTES_BLE",

@@ -588,6 +588,10 @@ class MicroLedsRenderer(Renderer):
         try:
             if sessions is None:
                 sessions = store.sessions()
+            # Under herdr, a key stands for a herdr agent (see herdr.agent_sessions).
+            from freemicro import herdr
+
+            sessions = herdr.agent_sessions(sessions)
             # The effective owned set, not the static ``config.keys``: when Codex
             # is not running the subset gives way to all six, so the keys it
             # names are re-driven (their projects / dark-if-empty). ``owned``

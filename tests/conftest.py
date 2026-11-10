@@ -20,6 +20,12 @@ def no_hardware(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_herdr(monkeypatch, tmp_path):
+    """Make herdr look absent: no test may reach the developer's real herdr."""
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(tmp_path / "no-herdr.sock"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_config(monkeypatch, tmp_path):
     """Keep tests off the developer's real ``~/.freemicro`` config."""
     monkeypatch.setenv("FREEMICRO_HOME", str(tmp_path / "freemicro"))

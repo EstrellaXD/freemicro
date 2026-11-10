@@ -613,6 +613,43 @@ def _run_app(act: Action, backend: Backend) -> None:
     )
 
 
+def _check_herdr(params: Mapping[str, Any]) -> None:
+    from freemicro import herdr
+
+    given = [f for f in ("preset", "keys", "text") if params.get(f)]
+    if len(given) != 1:
+        raise ValueError("a herdr binding needs exactly one of preset, keys or text")
+    if given == ["preset"] and params["preset"] not in herdr.PRESETS:
+        raise ValueError(f"unknown herdr preset {params['preset']!r}; expected one "
+                         f"of {', '.join(sorted(herdr.PRESETS))}")
+
+
+@action(
+    "herdr",
+    summary="Drive herdr (the house-of-herdr plugin's presets): preset=tab-next, "
+            "agent-next, pane-left, dial-mode, ...; or keys/text into the focused pane.",
+    optional=("preset", "keys", "text"),
+    check=_check_herdr,
+    describe=lambda act: "herdr " + next(
+        f"{field} {act.params[field]}" for field in ("preset", "keys", "text")
+        if act.params.get(field)
+    ),
+    modifier_safe=True,
+)
+def _run_herdr(act: Action, backend: Backend) -> None:
+    from freemicro import herdr
+
+    if act.params.get("preset"):
+        work = herdr.PRESETS[str(act.params["preset"])]
+    elif act.params.get("keys"):
+        keys = str(act.params["keys"])
+        work = lambda: herdr.send_to_focused_pane("pane.send_keys", {"keys": [keys]})  # noqa: E731
+    else:
+        text = str(act.params["text"])
+        work = lambda: herdr.send_to_focused_pane("pane.send_text", {"text": text})  # noqa: E731
+    herdr.run_in_background(work)
+
+
 #: The action an Agent Key gets by default. Named here because
 #: :mod:`freemicro.padconfig` fills in the ``slot`` for it from the input id.
 FOCUS_SESSION = "focus_session"

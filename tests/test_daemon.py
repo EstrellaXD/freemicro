@@ -214,6 +214,11 @@ def test_onconnect_plist_matches_the_codex_micro_over_hid_and_usb():
     assert usb["idVendor"] == 12346
     assert usb["idProduct"] == 33632
 
+    # The Creator Micro 2 (both PIDs) launches the agent too, on both transports.
+    assert {(m["IOProviderClass"], m.get("ProductID", m.get("idProduct")))
+            for m in matchers} >= {(cls, pid) for pid in (0x8297, 0x8298)
+                                   for cls in ("IOHIDDevice", "IOUSBHostDevice")}
+
 
 def test_onconnect_plist_does_not_run_at_login_and_does_not_keepalive():
     """The two flags that make it on-connect and not always-on.

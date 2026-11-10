@@ -97,6 +97,8 @@ CMDN_NEW_WINDOW_APPS = (
 _TTY_RE = re.compile(r"^/dev/[A-Za-z0-9._/-]{1,64}$")
 
 METHOD_TAB = "tab"
+#: The session runs in a herdr pane: focus it through herdr's socket API.
+METHOD_HERDR = "herdr"
 METHOD_APP = "app"
 METHOD_NONE = "none"
 
@@ -242,6 +244,8 @@ class FocusPlan:
         where = self.label or self.project
         if self.method == METHOD_TAB:
             return f"focus {where} - {self.app} tab {self.tty}"
+        if self.method == METHOD_HERDR:
+            return f"focus {where} - its herdr pane"
         if self.method == METHOD_APP:
             return f"focus {where} - {self.app} (tab unknown)"
         if where:
@@ -272,6 +276,9 @@ def plan_for_session(
     project = normalise_project(project or session.cwd)
     label = label or project
     terminal = session.terminal
+    if str(terminal.program or "").strip().lower() == "herdr":
+        return FocusPlan(method=METHOD_HERDR, app="herdr", project=project,
+                         label=label, session=session)
     app = app_name_for(terminal.program)
     tty = session_tty(session, lookup=tty_lookup)
 
@@ -468,7 +475,9 @@ def current_slots(
         # Already decayed by the store; the policy is passed on anyway so a
         # caller handing in raw records reaches the same verdict. The whole
         # policy, never a timer at a time - that is how the two ever differed.
-        sessions = store.sessions()
+        from freemicro import herdr
+
+        sessions = herdr.agent_sessions(store.sessions())
         decay = decay_of(store)
     except Exception:  # noqa: BLE001
         return []
@@ -538,6 +547,10 @@ def perform(plan: FocusPlan, backend: Any) -> bool:
     Deliberately quiet: a key that cannot find its terminal is a no-op, not an
     error dialog. ``freemicro keys --dry-run`` is where you find out why.
     """
+    if plan.method == METHOD_HERDR and plan.session is not None:
+        from freemicro import herdr
+
+        return herdr.focus_session(plan.session.session_id)
     if plan.method == METHOD_TAB and plan.script:
         backend.run_applescript(plan.script)
         return True
@@ -549,6 +562,7 @@ def perform(plan: FocusPlan, backend: Any) -> bool:
 
 __all__ = [
     "METHOD_APP",
+    "METHOD_HERDR",
     "METHOD_NONE",
     "METHOD_TAB",
     "SCRIPTABLE_APPS",

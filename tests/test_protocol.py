@@ -11,13 +11,16 @@ import json
 import pytest
 
 from freemicro.device.codex_micro import (
+    CREATOR_MICRO_2_PRODUCT_IDS,
     MAX_CHUNK,
+    PRODUCT_ID,
     OPCODE_DATA,
     REPORT_BYTES,
     REPORT_BYTES_BLE,
     REPORT_ID,
     TRANSPORT_BLE,
     TRANSPORT_USB,
+    Device,
     FrameDecoder,
     frame_message,
     notification,
@@ -282,6 +285,30 @@ def test_both_transports_carry_the_same_payload_bytes():
     assert [r[1] for r in usb] == [r[2] for r in ble]
 
 
+
+@pytest.mark.parametrize(
+    "product_id, transport, expected_bytes, expected_tail",
+    [
+        (PRODUCT_ID, TRANSPORT_USB, REPORT_BYTES, b"}\r\n"),
+        (PRODUCT_ID, TRANSPORT_BLE, REPORT_BYTES_BLE, b"}\r\n"),
+        # The Creator Micro 2 ignores the bare USB write; it wants the BLE form,
+        # and no CRLF (it answers that with "400 EmptyInput").
+        *[(pid, TRANSPORT_USB, REPORT_BYTES_BLE, b"}") for pid in CREATOR_MICRO_2_PRODUCT_IDS],
+    ],
+)
+def test_device_send_frames_by_product_id_and_transport(
+    monkeypatch, product_id, transport, expected_bytes, expected_tail
+):
+    sent = []
+    device = Device(None, transport=transport, product_id=product_id)
+    monkeypatch.setattr(device, "send_report", sent.append)
+    device.send({"m": "device.status", "id": 1})
+    assert [len(r) for r in sent] == [expected_bytes]
+    prefix = 1 if expected_bytes == REPORT_BYTES_BLE else 0
+    body = sent[0][prefix + 2:prefix + 2 + sent[0][prefix + 1]]
+    assert body == b'{"m":"device.status","id":1}' + expected_tail[1:]
+    assert device.transport == transport
+
 def test_decoder_round_trips_ble_framed_reports():
     decoder = FrameDecoder()
     message = {"m": "v.oai.hid", "p": {"k": "ENC_CW", "act": 2}}
@@ -291,3 +318,18 @@ def test_decoder_round_trips_ble_framed_reports():
     ):
         out.extend(decoder.feed(report))
     assert out == [message]
+
+
+@pytest.mark.parametrize("candidates, expected", [
+    # A Creator Micro 2 over USB: keyboard, consumer and vendor interfaces.
+    ([("USB", 1), ("USB", 12), ("USB", 0xFF00)], 2),
+    # A Codex Micro: one service whose primary usage is the keyboard.
+    ([("USB", 1)], 0),
+    # USB still beats BLE, whatever the usage page.
+    ([("Bluetooth Low Energy", 0xFF00), ("USB", 1)], 1),
+])
+def test_service_rank_picks_vendor_interface(candidates, expected) -> None:
+    from freemicro.device.codex_micro import _service_rank
+
+    ranks = [_service_rank(t, page) for t, page in candidates]
+    assert ranks.index(max(ranks)) == expected

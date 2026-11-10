@@ -30,16 +30,17 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 #: Monotonic, never the wall clock: a throttle window must survive an NTP step.
 _monotonic = time.monotonic
 
 
-def _detect_via_appkit() -> Optional[str]:
-    """Ask AppKit for the frontmost app's name through the objc runtime.
+def _detect_via_appkit() -> Optional[Tuple[str, str]]:
+    """Ask AppKit for the frontmost app's name and bundle id via the objc runtime.
 
-    Returns the localised name, or ``None`` if anything at all is not exactly
+    Returns ``(localised name, bundle id)`` - the bundle id is ``""`` for the
+    rare app without one - or ``None`` if anything at all is not exactly
     right. Guarded to the last line: this runs inside a live key bridge and a
     background daemon, so a wrong ``ctypes`` signature must degrade to "no
     profile", never take the process down.
@@ -81,14 +82,16 @@ def _detect_via_appkit() -> Optional[str]:
         return None
     shared = msg(workspace_cls, b"sharedWorkspace")
     app = msg(shared, b"frontmostApplication")
-    name_obj = msg(app, b"localizedName")
-    utf8 = msg(name_obj, b"UTF8String", restype=ctypes.c_char_p)
-    if not utf8:
-        return None
-    try:
-        return utf8.decode("utf-8") or None
-    except (UnicodeDecodeError, AttributeError):
-        return None
+
+    def text(selector: bytes) -> str:
+        utf8 = msg(msg(app, selector), b"UTF8String", restype=ctypes.c_char_p)
+        try:
+            return utf8.decode("utf-8") if utf8 else ""
+        except (UnicodeDecodeError, AttributeError):
+            return ""
+
+    name = text(b"localizedName")
+    return (name, text(b"bundleIdentifier")) if name else None
 
 
 def detect_frontmost() -> Optional[str]:
@@ -97,6 +100,15 @@ def detect_frontmost() -> Optional[str]:
     macOS only, and best-effort by design: on any other platform, or if the
     Objective-C runtime cannot be reached, this returns ``None`` and the caller
     treats that as "no profile is active". It never raises.
+    """
+    app = detect_frontmost_app()
+    return app[0] if app else None
+
+
+def detect_frontmost_app() -> Optional[Tuple[str, str]]:
+    """``(name, bundle id)`` of the frontmost app, or ``None``. Never raises.
+
+    The bundle id is what the pad's firmware matches ``linkedApps`` on.
     """
     if sys.platform != "darwin":
         return None
@@ -157,4 +169,69 @@ class FrontmostWatcher:
         return self._name
 
 
-__all__ = ["FrontmostWatcher", "detect_frontmost"]
+
+#: The vendor method that tells the pad which app is frontmost. On a Creator
+#: Micro 2 the firmware then switches to the layer whose ``linkedAppId`` names
+#: that bundle id in ``keymap.json``'s ``linkedApps``; an unlinked app keeps the
+#: current layer. Verified on firmware 0.6.3.
+METHOD_FOCUSED_APP = "host.focused_app"
+
+
+class PadFocusForwarder:
+    """Tell a Creator Micro 2 which app is frontmost, as Work Louder's Input does.
+
+    This is what makes the pad's own per-app layers switch without Input
+    running. Like Input it re-reads the OS once per ``interval`` and sends only
+    on a change - plus once on every (re)connect, which Input forgets to do.
+    """
+
+    def __init__(
+        self,
+        provider: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+        *,
+        clock: Optional[Callable[[], float]] = None,
+        interval: float = 1.0,
+    ) -> None:
+        self.provider = provider or detect_frontmost_app
+        self.clock = clock or _monotonic
+        self.interval = interval
+        self._device = None
+        self._sent: Optional[Tuple[str, str]] = None
+        self._last_at: Optional[float] = None
+
+    def attach(self, device) -> None:
+        """Forward to ``device`` from now on (``None`` on a drop)."""
+        self._device = device if getattr(device, "is_creator_micro_2", False) else None
+        self._sent = None
+        self._last_at = None
+
+    def poll(self) -> Optional[Tuple[str, str]]:
+        """Send the frontmost app if it changed; return what was sent, if anything."""
+        if self._device is None:
+            return None
+        now = self.clock()
+        if self._last_at is not None and now - self._last_at < self.interval:
+            return None
+        self._last_at = now
+        app = self.provider()
+        if not app or not app[1] or app == self._sent:
+            return None
+        try:
+            self._device.send({
+                "m": METHOD_FOCUSED_APP,
+                "p": {"appName": app[0], "process": app[1]},
+                "id": 1,
+            })
+        except Exception:  # noqa: BLE001 - a dropped pad must not kill the loop
+            return None
+        self._sent = app
+        return app
+
+
+__all__ = [
+    "METHOD_FOCUSED_APP",
+    "FrontmostWatcher",
+    "PadFocusForwarder",
+    "detect_frontmost",
+    "detect_frontmost_app",
+]

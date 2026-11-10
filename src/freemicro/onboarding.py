@@ -255,7 +255,7 @@ def step_device(answers: Answers) -> bool:
     print()
     _no(f"still nothing after {DEVICE_WAIT_SECONDS:g}s")
     _note("`freemicro detect` lists every HID device macOS can see - the pad\n"
-          "should appear as 303a:8360.")
+          "should appear as 303a:8360 (Creator Micro 2: 303a:8297 or 303a:8298).")
     return False
 
 
